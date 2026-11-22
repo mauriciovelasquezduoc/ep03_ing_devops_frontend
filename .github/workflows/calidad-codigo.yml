@@ -446,12 +446,14 @@ jobs:
             echo "::warning::Sin AWS_ACCESS_KEY_ID en secrets; métricas CI/CD no publicadas."
             exit 0
           fi
+          # Nota: put-metric-data NO acepta --dimensions junto con --metric-data;
+          # las dimensiones van dentro de cada entrada MetricData.
+          DIMS="Dimensions=[{Name=Repository,Value=${{ github.repository }}},{Name=Branch,Value=${{ github.ref_name }}}]"
           aws cloudwatch put-metric-data \
             --namespace Ep03/CI \
             --region "$AWS_REGION" \
-            --dimensions Repository=${{ github.repository }},Branch=${{ github.ref_name }} \
             --metric-data \
-              "MetricName=BuildDurationSeconds,Value=${{ steps.buildtime.outputs.build_seconds }},Unit=Seconds" \
-              "MetricName=TestCoveragePercent,Value=${{ steps.vitest.outputs.coverage }},Unit=Percent" \
-              "MetricName=TestsFailed,Value=${{ steps.vitest.outputs.tests_failed }},Unit=Count"
+              "MetricName=BuildDurationSeconds,Value=${{ steps.buildtime.outputs.build_seconds }},Unit=Seconds,${DIMS}" \
+              "MetricName=TestCoveragePercent,Value=${{ steps.vitest.outputs.coverage }},Unit=Percent,${DIMS}" \
+              "MetricName=TestsFailed,Value=${{ steps.vitest.outputs.tests_failed }},Unit=Count,${DIMS}"
           echo "Métricas publicadas (Ep03/CI)."
