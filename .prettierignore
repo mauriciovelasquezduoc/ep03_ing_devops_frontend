@@ -11,3 +11,7 @@ nginx.conf
 default.conf
 image/
 .github/
+# Manifiestos y configuración de Kubernetes (values.yaml es formato .env,
+# no YAML; los templates no son código del frontend)
+k8s/
+output/
