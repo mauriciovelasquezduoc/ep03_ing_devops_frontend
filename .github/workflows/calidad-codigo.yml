@@ -449,11 +449,30 @@ jobs:
           # Nota: put-metric-data NO acepta --dimensions junto con --metric-data;
           # las dimensiones van dentro de cada entrada MetricData.
           DIMS="Dimensions=[{Name=Repository,Value=${{ github.repository }}},{Name=Branch,Value=${{ github.ref_name }}}]"
+
+          # Solo se publican metricas con valor numerico valido: en una
+          # corrida inicial (o con jobs previos fallidos) puede faltar alguna;
+          # se omite con advertencia en lugar de romper el pipeline.
+          ENTRADAS=()
+          agregar() {
+            local nombre="$1" valor="$2" unidad="$3"
+            if [[ "$valor" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+              ENTRADAS+=("MetricName=$nombre,Value=$valor,Unit=$unidad,${DIMS}")
+            else
+              echo "::warning::Metrica $nombre sin valor numerico ('${valor:-vacio}'); se omite."
+            fi
+          }
+          agregar BuildDurationSeconds "${{ steps.buildtime.outputs.build_seconds }}" Seconds
+          agregar TestCoveragePercent  "${{ steps.vitest.outputs.coverage }}"    Percent
+          agregar TestsFailed          "${{ steps.vitest.outputs.tests_failed }}" Count
+
+          if [ "${#ENTRADAS[@]}" -eq 0 ]; then
+            echo "::warning::Sin metricas validas para publicar (corrida inicial o datos no disponibles)."
+            exit 0
+          fi
           aws cloudwatch put-metric-data \
             --namespace Ep03/CI \
             --region "$AWS_REGION" \
-            --metric-data \
-              "MetricName=BuildDurationSeconds,Value=${{ steps.buildtime.outputs.build_seconds }},Unit=Seconds,${DIMS}" \
-              "MetricName=TestCoveragePercent,Value=${{ steps.vitest.outputs.coverage }},Unit=Percent,${DIMS}" \
-              "MetricName=TestsFailed,Value=${{ steps.vitest.outputs.tests_failed }},Unit=Count,${DIMS}"
+            --metric-data "${ENTRADAS[@]}"
+          echo "Métricas publicadas (${#ENTRADAS[@]}): ${ENTRADAS[@]}"
           echo "Métricas publicadas (Ep03/CI)."
