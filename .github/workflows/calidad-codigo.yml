@@ -372,3 +372,86 @@ jobs:
           path: .lighthouseci/
           if-no-files-found: ignore
           retention-days: 7
+
+  # ============================================================
+  # METRICAS CI/CD - publicacion a AWS CloudWatch (IE12)
+  # ============================================================
+  # Publica en Ep03/CI las metricas del pipeline de calidad del frontend
+  # para el dashboard "ep03-observabilidad":
+  #   - BuildDurationSeconds  : duracion total del run
+  #   - TestCoveragePercent   : cobertura de lineas (Vitest v8, json-summary)
+  #   - TestsFailed           : tests fallidos (del resumen de Vitest)
+  # ============================================================
+  metricas-ci:
+    name: Métricas CI/CD -> CloudWatch (Ep03/CI)
+    needs: [prettier, eslint, test, coverage, mutation, sonarqube, snyk, container, dast, performance]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Ejecutar cobertura para extraer métricas
+        id: vitest
+        run: |
+          set -uo pipefail
+          npm run test:coverage > vitest.log 2>&1 || true
+          cat vitest.log || true
+
+          # Cobertura de líneas (coverage-summary.json, generado por json-summary)
+          if [ -f coverage/coverage-summary.json ]; then
+            COVERAGE=$(python3 -c "import json;print(json.load(open('coverage/coverage-summary.json'))['total']['lines']['pct'])")
+          else
+            echo "::warning::No se encontró coverage/coverage-summary.json"
+            COVERAGE=0
+          fi
+          echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
+
+          # Tests fallidos (resumen de Vitest: "N failed" / "N passed")
+          FAILED=$(grep -oE '[0-9]+ failed' vitest.log | head -1 | grep -o '[0-9]*' || echo 0)
+          echo "tests_failed=${FAILED:-0}" >> "$GITHUB_OUTPUT"
+          echo "Cobertura: ${COVERAGE}% | Tests fallidos: ${FAILED:-0}"
+
+      - name: Calcular tiempo de build
+        if: always()
+        id: buildtime
+        run: |
+          STARTED_AT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .run_started_at)
+          BUILD_SECONDS=$(( $(date -u +%s) - $(date -u -d "$STARTED_AT" +%s) ))
+          echo "build_seconds=${BUILD_SECONDS}" >> "$GITHUB_OUTPUT"
+
+      - name: Configurar credenciales AWS
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+
+      - name: Publicar métricas en CloudWatch (namespace Ep03/CI)
+        if: always()
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "::warning::Sin AWS_ACCESS_KEY_ID en secrets; métricas CI/CD no publicadas."
+            exit 0
+          fi
+          aws cloudwatch put-metric-data \
+            --namespace Ep03/CI \
+            --region "$AWS_REGION" \
+            --dimensions Repository=${{ github.repository }},Branch=${{ github.ref_name }} \
+            --metric-data \
+              "MetricName=BuildDurationSeconds,Value=${{ steps.buildtime.outputs.build_seconds }},Unit=Seconds" \
+              "MetricName=TestCoveragePercent,Value=${{ steps.vitest.outputs.coverage }},Unit=Percent" \
+              "MetricName=TestsFailed,Value=${{ steps.vitest.outputs.tests_failed }},Unit=Count"
+          echo "Métricas publicadas (Ep03/CI)."

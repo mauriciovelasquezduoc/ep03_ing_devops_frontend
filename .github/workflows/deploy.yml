@@ -25,6 +25,7 @@ env:
   ECR_REPO_FRONTEND: ep03-frontend
   K8S_NAMESPACE: ep03
   DEPLOYMENT_NAME: ep03-frontend
+  NODEGROUP_NAME: laboratorio-ep03-nodegroup
 
 permissions:
   contents: write
@@ -138,10 +139,19 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
-          CLUSTER=$(aws eks list-clusters --region "$AWS_REGION" --query 'clusters[0]' --output text)
+          # Preferir el cluster del episodio actual (ep03). Si no existe,
+          # usar el unico cluster disponible y avisar (evita desplegar en un
+          # cluster viejo como laboratorio-ep02-eks por orden alfabetico).
+          CLUSTER=$(aws eks list-clusters --region "$AWS_REGION" \
+            --query "clusters[?contains(@, 'ep03')] | [0]" --output text)
           if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "None" ]; then
-            echo "ERROR: No se encontro ningun cluster EKS en la region $AWS_REGION"
-            exit 1
+            CLUSTER=$(aws eks list-clusters --region "$AWS_REGION" \
+              --query 'clusters[0]' --output text)
+            if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "None" ]; then
+              echo "ERROR: No se encontro ningun cluster EKS en la region $AWS_REGION"
+              exit 1
+            fi
+            echo "ADVERTENCIA: no hay cluster ep03 en la region; usando: $CLUSTER"
           fi
           echo "EKS_CLUSTER_NAME=$CLUSTER" >> "$GITHUB_ENV"
           echo "  Cluster detectado: $CLUSTER"
@@ -161,11 +171,68 @@ jobs:
             --name "$EKS_CLUSTER_NAME"
           echo "  Contexto: $(kubectl config current-context)"
 
+      - name: Asegurar nodos Ready (escala el nodegroup si hace falta)
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          NODEGROUP_NAME: ${{ env.NODEGROUP_NAME }}
+        run: |
+          set -euo pipefail
+          READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+          if [ "$READY" -ge 1 ]; then
+            echo "  $READY nodo(s) Ready; continuando."
+            exit 0
+          fi
+          echo "  Sin nodos Ready. Escalando nodegroup $NODEGROUP_NAME a desiredSize=1..."
+          NG_STATUS=$(aws eks describe-nodegroup \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query 'nodegroup.status' --output text 2>/dev/null || echo "NOT-FOUND")
+          if [ "$NG_STATUS" = "NOT-FOUND" ]; then
+            echo "ERROR: el nodegroup $NODEGROUP_NAME no existe en $EKS_CLUSTER_NAME."
+            exit 1
+          fi
+          echo "  Estado del nodegroup: $NG_STATUS"
+          aws eks update-nodegroup-config \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --scaling-config minSize=1,desiredSize=1,maxSize=3 \
+            > /dev/null 2>&1 || true
+          echo "  Esperando hasta 15 min a que haya un nodo Ready..."
+          for i in $(seq 1 60); do
+            READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+            if [ "$READY" -ge 1 ]; then
+              echo "  Nodo Ready tras $((i*15))s."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "ERROR: no hubo nodos Ready tras 15 min."
+          kubectl get nodes || true
+          aws eks describe-nodegroup --cluster-name "$EKS_CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query 'nodegroup.{status:status,health:health.issues,scaling:scalingConfig}' --output table || true
+          exit 1
+
+
       - name: Validar acceso al cluster
         run: |
           set -euo pipefail
           kubectl get nodes
           kubectl get namespace "$K8S_NAMESPACE" 2>/dev/null || true
+
+      - name: Aplicar manifiestos k8s/
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-deploy.outputs.registry }}
+          IMAGE_TAG: ${{ needs.versioning.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          echo "  Aplicando manifiestos desde k8s/ (instalacion inicial o actualizacion)..."
+          echo "  Imagen: ${ECR_REGISTRY}/${ECR_REPO_FRONTEND}:${IMAGE_TAG}"
+          chmod +x k8s/*.sh
+          # El script valida prerequisitos (namespace + service del backend),
+          # genera los YAML desde values.yaml + templates/ y los aplica.
+          # FRONTEND_IMAGE por entorno tiene precedencia sobre values.yaml.
+          FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_REPO_FRONTEND}:${IMAGE_TAG}" ./k8s/apply.sh
 
       - name: Actualizar imagen del deployment
         env:
