@@ -425,10 +425,17 @@ jobs:
       - name: Calcular tiempo de build
         if: always()
         id: buildtime
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          STARTED_AT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .run_started_at)
-          BUILD_SECONDS=$(( $(date -u +%s) - $(date -u -d "$STARTED_AT" +%s) ))
-          echo "build_seconds=${BUILD_SECONDS}" >> "$GITHUB_OUTPUT"
+          STARTED_AT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --jq .run_started_at 2>/dev/null || echo "")
+          if [ -n "$STARTED_AT" ] && date -u -d "$STARTED_AT" +%s > /dev/null 2>&1; then
+            BUILD_SECONDS=$(( $(date -u +%s) - $(date -u -d "$STARTED_AT" +%s) ))
+            echo "build_seconds=${BUILD_SECONDS}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No se pudo leer run_started_at de la API; BuildDurationSeconds se omite."
+          fi
 
       - name: Configurar credenciales AWS
         if: always()
